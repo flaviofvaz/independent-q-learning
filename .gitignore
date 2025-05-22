@@ -1,0 +1,48 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyd
+*.pyo
+*.egg-info/
+.Python
+build/
+dist/
+
+# Virtual environment
+venv/
+env/
+.venv/
+.env/
+
+# IDE and editor files
+.idea/  # PyCharm
+.vscode/ # VS Code
+*.sublime-project
+*.sublime-workspace
+*.iml # IntelliJ IDEA files
+
+# Jupyter Notebook files
+.ipynb_checkpoints
+profile_default/
+ipython_config.py
+*.ipynb
+
+# Python test and coverage
+.coverage
+.pytest_cache/
+htmlcov/
+.mypy_cache/
+
+# Logs
+*.log
+log/
+
+# Database
+*.sqlite3
+*.db
+
+# Misc
+.DS_Store # macOS specific
+*.bak
+*.swp # vim swap files
+*~ # editor backup files

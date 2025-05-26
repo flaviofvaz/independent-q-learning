@@ -1,5 +1,6 @@
 import jax.numpy as jnp
 import jax
+from typing import Tuple, List
 
 
 class ReplayMemory:
@@ -10,10 +11,21 @@ class ReplayMemory:
 
         # Pre-allocate JAX arrays for efficiency
         self._states = jnp.zeros((capacity, *observation_shape), dtype=jnp.int8)
-        self._actions = jnp.zeros((capacity, *action_shape), dtype=jnp.int8)
-        self._rewards = jnp.zeros((capacity, *rewards_shape), dtype=jnp.float32)
+        if isinstance(action_shape, Tuple) or isinstance(action_shape, List):
+            self._actions = jnp.zeros((capacity, *action_shape), dtype=jnp.int8)
+        else:
+            self._actions = jnp.zeros((capacity, action_shape), dtype=jnp.int8)
+
+        if isinstance(rewards_shape, Tuple) or isinstance(rewards_shape, List):
+            self._rewards = jnp.zeros((capacity, *rewards_shape), dtype=jnp.float32)
+        else:
+            self._rewards = jnp.zeros((capacity, rewards_shape), dtype=jnp.float32)
         self._next_states = jnp.zeros((capacity, *observation_shape), dtype=jnp.int8)
-        self._dones = jnp.zeros((capacity, *dones_shape), dtype=jnp.bool_)
+        
+        if isinstance(dones_shape, Tuple) or isinstance(dones_shape, List):
+            self._dones = jnp.zeros((capacity, *dones_shape), dtype=jnp.bool_)
+        else:
+            self._dones = jnp.zeros((capacity, dones_shape), dtype=jnp.bool_)
 
 
     def update_memory(self, state: jnp.array, action: int, reward: float, next_state: jnp.array, is_done: bool):

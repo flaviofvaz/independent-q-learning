@@ -33,13 +33,13 @@ def initialize_replay_memory(memory: ReplayMemory, environment: LbfEnvironment):
 def td_loss(model: nnx.Module, state: jnp.array, action: jnp.array, reward: jnp.array, next_state: jnp.array, is_done: jnp.array):
     # td estimate
     q_values = model(state)
-    q_values = q_values[jnp.arange(0, jnp.shape(state)[0]), action]
+    q_values = q_values[jnp.arange(0, jnp.shape(state)[0]), action.squeeze()]
     td_estimate = q_values
     
     # td target 
     q_values = model(next_state)
     max_q_values = jnp.max(q_values, axis=-1)
-    td_target = reward + 0.99 * (1 - jnp.asarray(is_done, dtype=jnp.float32)) * max_q_values 
+    td_target = reward.squeeze() + 0.99 * (1 - jnp.asarray(is_done.squeeze(), dtype=jnp.float32)) * max_q_values 
 
     td_error = jnp.pow(td_target - td_estimate, 2)
     return jnp.average(td_error)
@@ -79,9 +79,9 @@ def train():
     experience_memory = ReplayMemory(
         capacity=memory_capacity, 
         observation_shape=observation_space, 
-        action_shape=(1,),
-        rewards_shape=(1,), 
-        dones_shape=(1,))
+        action_shape=1,
+        rewards_shape=1, 
+        dones_shape=1)
 
     # splitting random keys
     key, subkey = jax.random.split(key)
@@ -92,7 +92,7 @@ def train():
     # create dqn agent
     dqn_agent = DQNAgent(
             network=q_network,
-            action_space_dim=4,
+            action_space_dim=action_space_dim,
             gamma=0.99,
             epsilon=0.99
         )
@@ -134,18 +134,18 @@ def train():
             batch, key = experience_memory.retrieve_experience(batch_size=batch_size, key=key)
 
             # get entries 
-            state = batch["state"]
-            action = batch["action"]
-            reward = batch["reward"]
-            next_state = batch["next_state"]
-            is_done = batch["is_done"]
+            state_batch = batch["state"]
+            action_batch = batch["action"]
+            reward_batch = batch["reward"]
+            next_state_batch = batch["next_state"]
+            is_done_batch = batch["is_done"]
         
-            train_step(q_network, state, action, reward, next_state, is_done, optimizer, metrics)
+            train_step(q_network, state_batch, action_batch, reward_batch, next_state_batch, is_done_batch, optimizer, metrics)
 
-        # Log training metrics
-        for metric, value in metrics.compute().items():  
-            metrics_history[f'train_{metric}'].append(value)  
-            metrics.reset()  
+            # Log training metrics
+            for metric, value in metrics.compute().items():  
+                metrics_history[f'train_{metric}'].append(value)  
+                metrics.reset()  
         
         if (i+1) % 2000 == 0:
             print(

@@ -24,7 +24,7 @@ class DQNAgent(Agent):
             action = jax.random.randint(subkey_randint, shape=jnp.shape(state)[0], minval=0, maxval=self.action_space_dim)
         else:
             q_values = self.network(state)
-            action = jnp.argmax(q_values)
+            action = jnp.argmax(q_values, axis=1)
         return action.tolist(), new_key
     
 

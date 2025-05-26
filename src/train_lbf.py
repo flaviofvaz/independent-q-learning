@@ -1,0 +1,160 @@
+import sys
+sys.path.append("/home/flavio/projects/iql")  # Add the project root
+from networks.dqn import DQNAgent, DenseQNetwork
+from src.environments.lbf import LbfEnvironment
+from flax import nnx
+import optax
+import jax.numpy as jnp
+import jax
+import time
+from memory import ReplayMemory
+
+
+def initialize_replay_memory(memory: ReplayMemory, environment: LbfEnvironment):#environment: AtariEnvironment):
+    # initialize counter
+    counter = 0
+    
+    # initialize environment
+    observation, _ = environment.reset()
+    while counter < memory.get_capacity():
+        action = environment.sample_action()
+        new_observation, reward, terminated, truncated, info = environment.step(action)
+        for i in range(len(observation)):
+            memory.update_memory(observation[i], action[i], reward[i], new_observation[i], terminated or truncated)
+            counter += 1
+        if not terminated:
+            observation = new_observation
+        else:
+            observation, _ = environment.reset()
+
+        if counter % 1000 == 0:
+            print(f"{memory.get_size()} entries added to memory")
+
+def td_loss(model: nnx.Module, state: jnp.array, action: jnp.array, reward: jnp.array, next_state: jnp.array, is_done: jnp.array):
+    # td estimate
+    q_values = model(state)
+    q_values = q_values[jnp.arange(0, jnp.shape(state)[0]), action]
+    td_estimate = q_values
+    
+    # td target 
+    q_values = model(next_state)
+    max_q_values = jnp.max(q_values, axis=-1)
+    td_target = reward + 0.99 * (1 - jnp.asarray(is_done, dtype=jnp.float32)) * max_q_values 
+
+    td_error = jnp.pow(td_target - td_estimate, 2)
+    return jnp.average(td_error)
+
+@nnx.jit
+def train_step(model: nnx.Module, state: jnp.array, action: jnp.array, reward: jnp.array,
+               next_state: jnp.array, is_done: jnp.array, optimizer: nnx.Optimizer, 
+               metrics: nnx.MultiMetric):
+    
+    grad_fn = nnx.value_and_grad(td_loss)
+    loss, grads = grad_fn(model, state, action, reward, next_state, is_done)
+    metrics.update(loss=loss)
+    optimizer.update(grads)
+
+def train():
+    environment_name = "Foraging-8x8-2p-1f-v3"
+    rng = 0
+    batch_size = 32
+    frames = 200000
+    learning_rate = 0.0005
+    memory_capacity = 1000
+    action_space_dim = 6
+    observation_space = (9,)
+    train_every_n_steps = 4
+
+    # for cpu development
+    jax.config.update("jax_platforms", "cpu")
+
+    # create environment
+    environment = LbfEnvironment(environment_name)
+
+    # initialize main random key
+    key = jax.random.PRNGKey(rng)
+
+    # initialize experience/replay memory
+    print("Initializing experience memory")
+    experience_memory = ReplayMemory(
+        capacity=memory_capacity, 
+        observation_shape=observation_space, 
+        action_shape=(1,),
+        rewards_shape=(1,), 
+        dones_shape=(1,))
+
+    # splitting random keys
+    key, subkey = jax.random.split(key)
+
+    # create network
+    q_network = DenseQNetwork(observation_space, action_space_dim, rngs=nnx.Rngs(params=subkey) )
+    
+    # create dqn agent
+    dqn_agent = DQNAgent(
+            network=q_network,
+            action_space_dim=4,
+            gamma=0.99,
+            epsilon=0.99
+        )
+
+    # define optimizer
+    optimizer = nnx.Optimizer(dqn_agent.network, optax.adam(learning_rate))
+
+    # define metrics
+    metrics = nnx.MultiMetric(loss=nnx.metrics.Average('loss'))
+
+    # initialize memory
+    initialize_replay_memory(experience_memory, environment)
+
+    # initialize metrics history
+    metrics_history = {'train_loss': []}
+
+    print("Starting training")
+    start_time = time.time()
+    state, _ = environment.reset()
+    for i in range(frames):
+        # get agents actions        
+        agent_action, key = dqn_agent.act(state, key) 
+
+        # perform actions
+        new_state, reward, terminated, truncated, info = environment.step(agent_action)
+
+        # update memory
+        for j in range(len(state)):
+            experience_memory.update_memory(state[j], agent_action[j], reward[j], new_state[j], terminated or truncated)
+
+        # check if end of game
+        if not terminated:
+            state = new_state
+        else:
+            state, _ = environment.reset()
+
+        if (i+1) % train_every_n_steps == 0:
+            # sample batch of experiences
+            batch, key = experience_memory.retrieve_experience(batch_size=batch_size, key=key)
+
+            # get entries 
+            state = batch["state"]
+            action = batch["action"]
+            reward = batch["reward"]
+            next_state = batch["next_state"]
+            is_done = batch["is_done"]
+        
+            train_step(q_network, state, action, reward, next_state, is_done, optimizer, metrics)
+
+        # Log training metrics
+        for metric, value in metrics.compute().items():  
+            metrics_history[f'train_{metric}'].append(value)  
+            metrics.reset()  
+        
+        if (i+1) % 2000 == 0:
+            print(
+                f"frames seen: {i+1}, "
+                f"loss: {metrics_history['train_loss'][-1]}, "
+                f"total time: {time.time() - start_time}"
+            )
+            start_time = time.time()
+
+
+if __name__=="__main__":
+    train()

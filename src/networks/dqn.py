@@ -13,8 +13,9 @@ class Agent(ABC):
 class DQNAgent(Agent):
     def __init__(self, network: nnx.Module, action_space_dim: int, gamma: float, epsilon: float):
         self.network = network 
-        self.gamma = gamma
         self.epsilon = epsilon
+        self.epsilon_decay_reate = 0.0000009
+        self.epsilon_mininum = 0.05
         self.action_space_dim = action_space_dim 
 
     def act(self, state: jnp.array, key: jax.random.PRNGKey):
@@ -23,8 +24,11 @@ class DQNAgent(Agent):
             new_key, subkey_randint = jax.random.split(new_key)
             action = jax.random.randint(subkey_randint, shape=jnp.shape(state)[0], minval=0, maxval=self.action_space_dim)
         else:
-            q_values = self.network(state)
+            state_array = jnp.array(state)
+            q_values = self.network(state_array)
             action = jnp.argmax(q_values, axis=1)
+
+        self.epsilon = max(self.epsilon_mininum,  self.epsilon - self.epsilon_decay_reate)
         return action.tolist(), new_key
     
 

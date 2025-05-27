@@ -1,7 +1,5 @@
-import sys
-sys.path.append("/home/flavio/projects/iql")  # Add the project root
 from networks.dqn import DQNAgent, DenseQNetwork
-from src.environments.lbf import LbfEnvironment
+from environments.lbf import LbfEnvironment
 from flax import nnx
 import optax
 import jax.numpy as jnp
@@ -10,13 +8,13 @@ import time
 from memory import ReplayMemory
 
 
-def initialize_replay_memory(memory: ReplayMemory, environment: LbfEnvironment):#environment: AtariEnvironment):
+def initialize_replay_memory(memory: ReplayMemory, environment: LbfEnvironment, starting_capacity: int):
     # initialize counter
     counter = 0
     
     # initialize environment
     observation, _ = environment.reset()
-    while counter < memory.get_capacity():
+    while counter < starting_capacity:
         action = environment.sample_action()
         new_observation, reward, terminated, truncated, info = environment.step(action)
         for i in range(len(observation)):
@@ -55,12 +53,13 @@ def train_step(model: nnx.Module, state: jnp.array, action: jnp.array, reward: j
     optimizer.update(grads)
 
 def train():
-    environment_name = "Foraging-8x8-2p-1f-v3"
+    environment_name = "Foraging-8x8-2p-1f-coop-v3"
     rng = 0
     batch_size = 32
-    frames = 200000
+    frames = 10_000_000
     learning_rate = 0.0005
-    memory_capacity = 1000
+    memory_capacity = 100_000
+    starting_capacity = 10_000
     action_space_dim = 6
     observation_space = (9,)
     train_every_n_steps = 4
@@ -94,7 +93,7 @@ def train():
             network=q_network,
             action_space_dim=action_space_dim,
             gamma=0.99,
-            epsilon=0.99
+            epsilon=1.0
         )
 
     # define optimizer
@@ -104,12 +103,17 @@ def train():
     metrics = nnx.MultiMetric(loss=nnx.metrics.Average('loss'))
 
     # initialize memory
-    initialize_replay_memory(experience_memory, environment)
+    initialize_replay_memory(experience_memory, environment, starting_capacity)
 
     # initialize metrics history
     metrics_history = {'train_loss': []}
 
     print("Starting training")
+    episodes_rewards = []
+    current_reward = 0.0
+    episode_counter = 0
+    average_reward = 0.0
+
     start_time = time.time()
     state, _ = environment.reset()
     for i in range(frames):
@@ -119,15 +123,32 @@ def train():
         # perform actions
         new_state, reward, terminated, truncated, info = environment.step(agent_action)
 
-        # update memory
+        # update memory and episode rewards
         for j in range(len(state)):
             experience_memory.update_memory(state[j], agent_action[j], reward[j], new_state[j], terminated or truncated)
+            current_reward += reward[j]
 
         # check if end of game
         if not terminated:
             state = new_state
         else:
             state, _ = environment.reset()
+            episodes_rewards.append(float(current_reward))
+            average_reward += float(current_reward)
+            current_reward = 0.0
+            episode_counter += 1
+
+            if episode_counter % 100 == 0:
+                print(
+                    f"total episodes: {episode_counter}, "
+                    f"frames seen: {i+1}, "
+                    f"last 100 episodes average total reward: {average_reward / 100.0}, "
+                    f"exploration rate: {dqn_agent.epsilon}, "
+                    f"loss: {metrics_history['train_loss'][-1]}, "
+                    f"total time: {time.time() - start_time}"
+                )
+                average_reward = 0.0
+                start_time = time.time()
 
         if (i+1) % train_every_n_steps == 0:
             # sample batch of experiences
@@ -140,21 +161,13 @@ def train():
             next_state_batch = batch["next_state"]
             is_done_batch = batch["is_done"]
         
-            train_step(q_network, state_batch, action_batch, reward_batch, next_state_batch, is_done_batch, optimizer, metrics)
+            train_step(dqn_agent.network, state_batch, action_batch, reward_batch, next_state_batch, is_done_batch, optimizer, metrics)
 
             # Log training metrics
             for metric, value in metrics.compute().items():  
                 metrics_history[f'train_{metric}'].append(value)  
                 metrics.reset()  
         
-        if (i+1) % 2000 == 0:
-            print(
-                f"frames seen: {i+1}, "
-                f"loss: {metrics_history['train_loss'][-1]}, "
-                f"total time: {time.time() - start_time}"
-            )
-            start_time = time.time()
-
 
 if __name__=="__main__":
     train()

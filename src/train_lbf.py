@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import jax
 import time
 from memory import ReplayMemory
+import copy
 
 
 def initialize_replay_memory(
@@ -39,6 +40,7 @@ def initialize_replay_memory(
 
 def td_loss(
     model: nnx.Module,
+    target_model: nnx.Module,
     state: jnp.array,
     action: jnp.array,
     reward: jnp.array,
@@ -51,7 +53,7 @@ def td_loss(
     td_estimate = q_values
 
     # td target
-    q_values = model(next_state)
+    q_values = target_model(next_state)
     max_q_values = jnp.max(q_values, axis=-1)
     td_target = (
         reward.squeeze()
@@ -65,6 +67,7 @@ def td_loss(
 @nnx.jit
 def train_step(
     model: nnx.Module,
+    target_model: nnx.Module,
     state: jnp.array,
     action: jnp.array,
     reward: jnp.array,
@@ -75,7 +78,7 @@ def train_step(
 ):
 
     grad_fn = nnx.value_and_grad(td_loss)
-    loss, grads = grad_fn(model, state, action, reward, next_state, is_done)
+    loss, grads = grad_fn(model, target_model, state, action, reward, next_state, is_done)
     metrics.update(loss=loss)
     optimizer.update(grads)
 
@@ -91,6 +94,7 @@ def train():
     action_space_dim = 6
     observation_space = (9,)
     train_every_n_steps = 4
+    update_target_every_n_steps = 10000
 
     # for cpu development
     jax.config.update("jax_platforms", "cpu")
@@ -118,6 +122,9 @@ def train():
     q_network = DenseQNetwork(
         observation_space, action_space_dim, rngs=nnx.Rngs(params=subkey)
     )
+
+    # create target network
+    target_q_network = copy.deepcopy(q_network)
 
     # create dqn agent
     dqn_agent = DQNAgent(
@@ -199,6 +206,7 @@ def train():
 
             train_step(
                 dqn_agent.network,
+                target_q_network,
                 state_batch,
                 action_batch,
                 reward_batch,
@@ -212,6 +220,11 @@ def train():
             for metric, value in metrics.compute().items():
                 metrics_history[f"train_{metric}"].append(value)
                 metrics.reset()
+        
+        if (i + 1) % update_target_every_n_steps == 0:
+            # update target network
+            params = nnx.state(dqn_agent.network, nnx.Param)
+            target_q_network.update_state(params)
 
 
 if __name__ == "__main__":

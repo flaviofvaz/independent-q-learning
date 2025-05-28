@@ -6,7 +6,6 @@ import jax.numpy as jnp
 import jax
 import time
 from memory import ReplayMemory
-import copy
 
 
 def initialize_replay_memory(
@@ -88,13 +87,13 @@ def train():
     rng = 0
     batch_size = 32
     frames = 10_000_000
-    learning_rate = 0.0005
-    memory_capacity = 100_000
-    starting_capacity = 10_000
+    learning_rate = 0.00025 / 4
+    memory_capacity = 1_000_000
+    starting_capacity = 50_000
     action_space_dim = 6
     observation_space = (9,)
     train_every_n_steps = 4
-    update_target_every_n_steps = 10000
+    update_target_every_n_steps = 10_000
 
     # for cpu development
     jax.config.update("jax_platforms", "cpu")
@@ -124,7 +123,8 @@ def train():
     )
 
     # create target network
-    target_q_network = copy.deepcopy(q_network)
+    nnx_graphdef, nnx_state = nnx.split(q_network)
+    target_q_network = nnx.merge(nnx_graphdef, nnx_state)
 
     # create dqn agent
     dqn_agent = DQNAgent(
@@ -132,7 +132,7 @@ def train():
     )
 
     # define optimizer
-    optimizer = nnx.Optimizer(dqn_agent.network, optax.adam(learning_rate))
+    optimizer = nnx.Optimizer(dqn_agent.network, optax.adam(learning_rate, eps=1.5e-4))
 
     # define metrics
     metrics = nnx.MultiMetric(loss=nnx.metrics.Average("loss"))
@@ -223,8 +223,8 @@ def train():
         
         if (i + 1) % update_target_every_n_steps == 0:
             # update target network
-            params = nnx.state(dqn_agent.network, nnx.Param)
-            target_q_network.update_state(params)
+            nnx_graphdef, nnx_state = nnx.split(dqn_agent.network)
+            target_q_network = nnx.merge(nnx_graphdef, nnx_state)
 
 
 if __name__ == "__main__":

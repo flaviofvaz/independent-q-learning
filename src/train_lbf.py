@@ -8,6 +8,9 @@ import time
 from memory import ReplayMemory
 
 
+# for cpu development
+jax.config.update("jax_platforms", "cpu")
+
 def initialize_replay_memory(
     memory: ReplayMemory, environment: LbfEnvironment, starting_capacity: int
 ):
@@ -18,16 +21,18 @@ def initialize_replay_memory(
     observation, _ = environment.reset()
     while counter < starting_capacity:
         action = environment.sample_action()
-        new_observation, reward, terminated, truncated, info = environment.step(action)
-        for i in range(len(observation)):
-            memory.update_memory(
-                observation[i],
-                action[i],
-                reward[i],
-                new_observation[i],
-                terminated or truncated,
-            )
-            counter += 1
+        new_observation, reward, terminated, truncated, _ = environment.step(action)
+        data_len = len(new_observation)
+        done_flag = terminated or truncated
+        dones = jnp.full((data_len,), done_flag, dtype=jnp.bool_) 
+        memory.batch_update_memory(
+            observation,
+            action,
+            reward,
+            new_observation,
+            dones,
+        )
+        counter += data_len
         if not terminated:
             observation = new_observation
         else:
@@ -35,7 +40,6 @@ def initialize_replay_memory(
 
         if counter % 1000 == 0:
             print(f"{memory.get_size()} entries added to memory")
-
 
 def td_loss(
     model: nnx.Module,
@@ -48,20 +52,17 @@ def td_loss(
 ):
     # td estimate
     q_values = model(state)
-    q_values = q_values[jnp.arange(0, jnp.shape(state)[0]), action.squeeze()]
+    q_values = q_values[jnp.arange(0, jnp.shape(state)[0]), action]
     td_estimate = q_values
 
     # td target
     q_values = target_model(next_state)
     max_q_values = jnp.max(q_values, axis=-1)
-    td_target = (
-        reward.squeeze()
-        + 0.99 * (1 - jnp.asarray(is_done.squeeze(), dtype=jnp.float32)) * max_q_values
-    )
+    td_target = reward + 0.99 * (1.0 - is_done) * max_q_values
 
+    # td error
     td_error = jnp.pow(td_target - td_estimate, 2)
     return jnp.average(td_error)
-
 
 @nnx.jit
 def train_step(
@@ -83,7 +84,7 @@ def train_step(
 
 
 def train():
-    environment_name = "Foraging-8x8-2p-1f-coop-v3"
+    environment_name = "Foraging-8x8-2p-2f-coop-v3"
     rng = 0
     batch_size = 32
     frames = 10_000_000
@@ -91,12 +92,12 @@ def train():
     memory_capacity = 1_000_000
     starting_capacity = 50_000
     action_space_dim = 6
-    observation_space = (9,)
+    observation_space = (12,)
     train_every_n_steps = 4
     update_target_every_n_steps = 10_000
-
-    # for cpu development
-    jax.config.update("jax_platforms", "cpu")
+    evaluate_every_n_steps = 100_000
+    evaluation_episodes = 100
+    evaluation_epsilon = 0.001
 
     # create environment
     environment = LbfEnvironment(environment_name)
@@ -113,7 +114,7 @@ def train():
         rewards_shape=1,
         dones_shape=1,
     )
-
+    
     # splitting random keys
     key, subkey = jax.random.split(key)
 
@@ -132,7 +133,7 @@ def train():
     )
 
     # define optimizer
-    optimizer = nnx.Optimizer(dqn_agent.network, optax.adam(learning_rate, eps=1.5e-4))
+    optimizer = nnx.Optimizer(dqn_agent.network, optax.adam(learning_rate))
 
     # define metrics
     metrics = nnx.MultiMetric(loss=nnx.metrics.Average("loss"))
@@ -151,23 +152,25 @@ def train():
 
     start_time = time.time()
     state, _ = environment.reset()
+
+    # starting profiler
+    # jax.profiler.start_server(9999) 
     for i in range(frames):
         # get agents actions
-        agent_action, key = dqn_agent.act(state, key)
+        agent_action, key = dqn_agent.act(jnp.array(state, dtype=jnp.float32), key)
 
         # perform actions
-        new_state, reward, terminated, truncated, info = environment.step(agent_action)
+        new_state, reward, terminated, truncated, _ = environment.step(agent_action)
 
         # update memory and episode rewards
-        for j in range(len(state)):
-            experience_memory.update_memory(
-                state[j],
-                agent_action[j],
-                reward[j],
-                new_state[j],
-                terminated or truncated,
-            )
-            current_reward += reward[j]
+        experience_memory.batch_update_memory(
+            jnp.array(state),
+            jnp.array(agent_action),
+            jnp.array(reward),
+            jnp.array(new_state),
+            jnp.array(terminated or truncated),
+        )
+        current_reward += sum(reward)
 
         # check if end of game
         if not terminated:
@@ -192,17 +195,17 @@ def train():
                 start_time = time.time()
 
         if (i + 1) % train_every_n_steps == 0:
+            key, subkey = jax.random.split(key)
             # sample batch of experiences
             batch, key = experience_memory.retrieve_experience(
                 batch_size=batch_size, key=key
             )
 
-            # get entries
-            state_batch = batch["state"]
+            state_batch = jnp.array(batch["state"], dtype=jnp.float32)
             action_batch = batch["action"]
-            reward_batch = batch["reward"]
-            next_state_batch = batch["next_state"]
-            is_done_batch = batch["is_done"]
+            reward_batch = jnp.array(batch["reward"], dtype=jnp.float32)
+            next_state_batch = jnp.array(batch["next_state"], dtype=jnp.float32)
+            is_terminal_batch = jnp.array(batch["is_terminal"], dtype=jnp.float32)
 
             train_step(
                 dqn_agent.network,
@@ -211,7 +214,7 @@ def train():
                 action_batch,
                 reward_batch,
                 next_state_batch,
-                is_done_batch,
+                is_terminal_batch,
                 optimizer,
                 metrics,
             )
@@ -226,6 +229,30 @@ def train():
             nnx_graphdef, nnx_state = nnx.split(dqn_agent.network)
             target_q_network = nnx.merge(nnx_graphdef, nnx_state)
 
+        if (i + 1) % evaluate_every_n_steps == 0:
+            total_rewards = 0.0
+            # evaluate on N episodes
+            for k in range(evaluation_episodes):
+                curr_reward, key = run_episode(environment, dqn_agent, key)
+                total_rewards += curr_reward
+            total_rewards /= float(evaluation_episodes)
+            print(f"Step {i+1} - Evaluation: {total_rewards}")
+            state, _ = environment.reset()
+            current_reward = 0.0
+
+    jax.profiler.stop_server()
+
+def run_episode(environment, dqn_agent, key):
+    done = False
+    state, _ = environment.reset()
+    total_reward = 0.0
+    while not done:
+        agent_action, key = dqn_agent.act(jnp.array(state, dtype=jnp.float32), key, False)
+        new_state, reward, terminated, truncated, _ = environment.step(agent_action)
+        total_reward += sum(reward)
+        state = new_state
+        done = terminated or truncated
+    return total_reward, key
 
 if __name__ == "__main__":
     train()

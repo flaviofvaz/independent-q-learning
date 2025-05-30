@@ -24,36 +24,20 @@ class DQNAgent(Agent):
         self.epsilon = epsilon
         self.epsilon_decay_reate = 0.0000009
         self.epsilon_mininum = 0.05
+        self.epsilon_evaluation = 0.01
         self.action_space_dim = action_space_dim
 
-    def act(self, state: jnp.array, key: jax.random.PRNGKey) -> tuple[list[int], jax.random.PRNGKey]:
+
+    def act(self, state: jnp.array, key: jax.random.PRNGKey, training=True) -> tuple[list[int], jax.random.PRNGKey]:
         """
         Selects actions for a batch of states using an epsilon-greedy policy.
         """
-        num_agents = len(state)
-        key, explore_key, action_key = jax.random.split(key, 3)
-
-        # get q-values from the network for all agents
-        q_values = self.network(jnp.array(state))
-        greedy_actions = jnp.argmax(q_values, axis=1)
-
-        # generate random actions for all agents
-        random_actions = jax.random.randint(
-            action_key,
-            shape=(num_agents,),
-            minval=0,
-            maxval=self.action_space_dim,
-        )
-
-        # decide for each agent whether to explore or exploit
-        explore_decisions = jax.random.uniform(explore_key, shape=(num_agents,)) < self.epsilon
-
-        # select actions based on the exploration decision
-        actions = jnp.where(explore_decisions, random_actions, greedy_actions)
-
-        # adjust epsilon
-        self.epsilon = max(self.epsilon_mininum, self.epsilon - self.epsilon_decay_reate)
-
+        if training:
+            actions, key = _act_epsilon_greedy(self.network, state, self.epsilon, key)
+            # adjust epsilon
+            self.epsilon = max(self.epsilon_mininum, self.epsilon - self.epsilon_decay_reate)
+        else:
+            actions, key = _act_epsilon_greedy(self.network, state, self.epsilon_evaluation, key)
         return actions.tolist(), key
 
 
@@ -97,3 +81,28 @@ class DenseQNetwork(nnx.Module):
         x = nnx.relu(self.linear2(x))
         out = self.linear3(x)
         return out
+    
+@nnx.jit
+def _act_epsilon_greedy(network: nnx.Module, state: jnp.array, epsilon:jnp.array, key: jax.random.PRNGKey):
+    num_agents = jnp.shape(state)[0]
+    key, explore_key, action_key = jax.random.split(key, 3)
+
+    # get q-values from the network for all agents
+    q_values = network(jnp.array(state))
+    greedy_actions = jnp.argmax(q_values, axis=1)
+
+    # generate random actions for all agents
+    random_actions = jax.random.randint(
+        action_key,
+        shape=(num_agents,),
+        minval=0,
+        maxval=6,
+    )
+
+    # decide for each agent whether to explore or exploit
+    explore_decisions = jax.random.uniform(explore_key, shape=(num_agents,)) < epsilon
+
+    # select actions based on the exploration decision
+    actions = jnp.where(explore_decisions, random_actions, greedy_actions)
+
+    return actions, key

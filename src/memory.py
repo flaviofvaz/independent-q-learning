@@ -57,7 +57,7 @@ class ReplayMemory:
         # convert dtypes
         state_jax = jnp.asarray(state, dtype=jnp.uint8)
         action_jax = jnp.expand_dims(jnp.asarray(action, dtype=jnp.uint8), axis=-1)
-        reward_jax = jnp.expand_dims(jnp.asarray(reward, jnp.float32), axis=-1)
+        reward_jax = jnp.expand_dims(jnp.sign(jnp.asarray(reward, jnp.float32)), axis=-1)
         next_state_jax = jnp.asarray(next_state, dtype=jnp.uint8)
         done_jax = jnp.expand_dims(jnp.asarray(is_done, dtype=jnp.bool_), axis=-1)
 

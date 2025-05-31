@@ -30,22 +30,15 @@ def initialize_replay_memory(
         new_observation, reward, terminated, truncated, _ = environment.step(action)
         data_len = len(new_observation)
         done_flag = terminated or truncated
-        dones = jnp.full((data_len,), done_flag, dtype=jnp.bool_) 
         
         obss.extend(observation)
         actionss.extend(action)
         new_obss.extend(new_observation)
         rewardss.extend(reward)
-        doness.extend(dones)
+        doness.extend([done_flag] * len(observation))
+        counter += data_len
 
-        if counter % 1000:
-            # memory.batch_update_memory(
-            #     observation,
-            #     action,
-            #     reward,
-            #     new_observation,
-            #     dones,
-            # )
+        if len(obss) % 1000 == 0:
             memory.batch_update_memory(
                 obss,
                 actionss,
@@ -59,7 +52,6 @@ def initialize_replay_memory(
             rewardss = []
             doness = []
 
-        counter += data_len
         if not terminated:
             observation = new_observation
         else:
@@ -68,6 +60,7 @@ def initialize_replay_memory(
         if counter % 1000 == 0:
             print(f"{memory.get_size()} entries added to memory")
 
+@nnx.jit
 def td_loss(
     model: nnx.Module,
     target_model: nnx.Module,
@@ -80,17 +73,19 @@ def td_loss(
     # td estimate
     q_values = model(state)
     action_squeezed = action.squeeze(axis=-1) 
-    q_values = q_values[jnp.arange(0, jnp.shape(state)[0]), action_squeezed]
-    td_estimate = q_values
+    td_estimate = q_values[jnp.arange(q_values.shape[0]), action_squeezed]
 
     # td target
-    q_values = target_model(next_state)
-    max_q_values = jnp.max(q_values, axis=-1)
-    td_target = reward + 0.99 * (1.0 - is_done) * max_q_values
+    target_q_values = jax.lax.stop_gradient(target_model(next_state))
+    max_q_values = jnp.max(target_q_values, axis=-1)
+    td_target = reward.squeeze(-1) + 0.99 * (1.0 - is_done.squeeze(-1)) * max_q_values
 
     # td error
-    td_error = jnp.pow(td_target - td_estimate, 2)
-    return jnp.average(td_error)
+    delta = td_target - td_estimate
+    huber_loss = jnp.where(jnp.abs(delta) < 1.0, 
+                            0.5 * delta**2, 
+                            jnp.abs(delta) - 0.5)
+    return jnp.mean(huber_loss)
 
 @nnx.jit
 def train_step(
@@ -116,7 +111,7 @@ def train():
     rng = 0
     batch_size = 32
     frames = 10_000_000
-    learning_rate = 0.00025 / 4
+    learning_rate = 0.0003
     memory_capacity = 1_000_000
     starting_capacity = 50_000
     action_space_dim = 6
@@ -125,7 +120,7 @@ def train():
     update_target_every_n_steps = 10_000
     evaluate_every_n_steps = 100_000
     evaluation_episodes = 100
-    evaluation_epsilon = 0.001
+    evaluation_epsilon = 0.05
 
     # create environment
     environment = LbfEnvironment(environment_name)
@@ -178,19 +173,18 @@ def train():
     episode_counter = 0
     average_reward = 0.0
 
-    start_time = time.time()
-    state, _ = environment.reset()
-
     obss = []
     actionss = []
     new_obss = []
     rewardss = []
     doness = []
 
-    # starting profiler
+    start_time = time.time()
+    state, _ = environment.reset()
     for i in range(frames):
+        state = jnp.array(state, dtype=jnp.float32)
         # get agents actions
-        agent_action, key = dqn_agent.act(jnp.array(state, dtype=jnp.float32), key)
+        agent_action, key = dqn_agent.act(state, key)
 
         # perform actions
         new_state, reward, terminated, truncated, _ = environment.step(agent_action)
@@ -203,15 +197,6 @@ def train():
         new_obss.extend(new_state)
         rewardss.extend(reward)
         doness.extend(dones)
-
-        # # update memory and episode rewards
-        # experience_memory.batch_update_memory(
-        #     jnp.array(state),
-        #     jnp.array(agent_action),
-        #     jnp.array(reward),
-        #     jnp.array(new_state),
-        #     jnp.array(terminated or truncated),
-        # )
         current_reward += sum(reward)
 
         # check if end of game
@@ -260,7 +245,7 @@ def train():
 
             state_batch = jnp.array(batch["state"], dtype=jnp.float32)
             action_batch = batch["action"]
-            reward_batch = jnp.array(batch["reward"], dtype=jnp.float32)
+            reward_batch = batch["reward"]
             next_state_batch = jnp.array(batch["next_state"], dtype=jnp.float32)
             is_terminal_batch = jnp.array(batch["is_terminal"], dtype=jnp.float32)
 
@@ -288,12 +273,18 @@ def train():
 
         if (i + 1) % evaluate_every_n_steps == 0:
             total_rewards = 0.0
+            total_foods_collected = 0.0
+            episodes_completed = 0
             # evaluate on N episodes
-            for k in range(evaluation_episodes):
-                curr_reward, key = run_episode(environment, dqn_agent, key)
+            for _ in range(evaluation_episodes):
+                curr_reward, foods_collected, key = run_episode(environment, dqn_agent, key)
                 total_rewards += curr_reward
+                total_foods_collected += float(foods_collected / 2.0)
+                if foods_collected == 2:
+                    episodes_completed += 1
             total_rewards /= float(evaluation_episodes)
-            print(f"Step {i+1} - Evaluation: {total_rewards}")
+            total_foods_collected /= float(evaluation_episodes)
+            print(f"Step {i+1} - Evaluation - Average rewards: {total_rewards} - Average Food collection: {total_foods_collected} - Episodes completed: {episodes_completed}")
             state, _ = environment.reset()
             current_reward = 0.0
 
@@ -301,14 +292,19 @@ def train():
 def run_episode(environment, dqn_agent, key):
     done = False
     state, _ = environment.reset()
+    foods_collected = 0
     total_reward = 0.0
     while not done:
-        agent_action, key = dqn_agent.act(jnp.array(state, dtype=jnp.float32), key, False)
+        state = jnp.asarray(state, dtype=jnp.float32)
+        agent_action, key = dqn_agent.act(state, key, False)
         new_state, reward, terminated, truncated, _ = environment.step(agent_action)
-        total_reward += sum(reward)
+        curr_reward = sum(reward)
+        if curr_reward > 0:
+            foods_collected += 1
+        total_reward += curr_reward
         state = new_state
         done = terminated or truncated
-    return total_reward, key
+    return total_reward, foods_collected, key
 
 
 if __name__ == "__main__":

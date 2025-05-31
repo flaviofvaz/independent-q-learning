@@ -23,8 +23,8 @@ class DQNAgent(Agent):
         self.network = network
         self.epsilon = epsilon
         self.epsilon_decay_reate = 0.0000009
-        self.epsilon_mininum = 0.05
-        self.epsilon_evaluation = 0.01
+        self.epsilon_mininum = 0.1
+        self.epsilon_evaluation = 0.05
         self.action_space_dim = action_space_dim
 
 
@@ -72,15 +72,15 @@ class QNetwork(nnx.Module):
 
 class DenseQNetwork(nnx.Module):
     def __init__(self, input_dimension, output_dimension, rngs: nnx.Rngs):
-        self.linear1 = nnx.Linear(*input_dimension, 256, rngs=rngs)
-        self.linear2 = nnx.Linear(256, 256, rngs=rngs)
-        self.linear3 = nnx.Linear(256, output_dimension, rngs=rngs)
+        self.linear1 = nnx.Linear(*input_dimension, 128, kernel_init=nnx.initializers.lecun_uniform(), rngs=rngs)
+        #self.linear2 = nnx.Linear(128, 128, kernel_init=nnx.initializers.lecun_uniform(), rngs=rngs)
+        self.linear3 = nnx.Linear(128, output_dimension, kernel_init=nnx.initializers.lecun_uniform(), rngs=rngs)
 
     def __call__(self, x, training: bool = True):
         x = nnx.relu(self.linear1(x))
-        x = nnx.relu(self.linear2(x))
-        out = self.linear3(x)
-        return out
+        #x = nnx.relu(self.linear2(x))
+        x = self.linear3(x)
+        return x
     
 @nnx.jit
 def _act_epsilon_greedy(network: nnx.Module, state: jnp.array, epsilon:jnp.array, key: jax.random.PRNGKey):

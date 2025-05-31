@@ -88,7 +88,7 @@ def _act_epsilon_greedy(network: nnx.Module, state: jnp.array, epsilon:jnp.array
     key, explore_key, action_key = jax.random.split(key, 3)
 
     # get q-values from the network for all agents
-    q_values = network(jnp.array(state))
+    q_values = network(state)
     greedy_actions = jnp.argmax(q_values, axis=1)
 
     # generate random actions for all agents

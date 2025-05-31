@@ -19,19 +19,46 @@ def initialize_replay_memory(
 
     # initialize environment
     observation, _ = environment.reset()
+
+    obss = []
+    actionss = []
+    new_obss = []
+    rewardss = []
+    doness = []
     while counter < starting_capacity:
         action = environment.sample_action()
         new_observation, reward, terminated, truncated, _ = environment.step(action)
         data_len = len(new_observation)
         done_flag = terminated or truncated
         dones = jnp.full((data_len,), done_flag, dtype=jnp.bool_) 
-        memory.batch_update_memory(
-            observation,
-            action,
-            reward,
-            new_observation,
-            dones,
-        )
+        
+        obss.extend(observation)
+        actionss.extend(action)
+        new_obss.extend(new_observation)
+        rewardss.extend(reward)
+        doness.extend(dones)
+
+        if counter % 1000:
+            # memory.batch_update_memory(
+            #     observation,
+            #     action,
+            #     reward,
+            #     new_observation,
+            #     dones,
+            # )
+            memory.batch_update_memory(
+                obss,
+                actionss,
+                rewardss,
+                new_obss,
+                doness,
+            )
+            obss = []
+            actionss = []
+            new_obss = []
+            rewardss = []
+            doness = []
+
         counter += data_len
         if not terminated:
             observation = new_observation
@@ -52,7 +79,8 @@ def td_loss(
 ):
     # td estimate
     q_values = model(state)
-    q_values = q_values[jnp.arange(0, jnp.shape(state)[0]), action]
+    action_squeezed = action.squeeze(axis=-1) 
+    q_values = q_values[jnp.arange(0, jnp.shape(state)[0]), action_squeezed]
     td_estimate = q_values
 
     # td target
@@ -153,8 +181,13 @@ def train():
     start_time = time.time()
     state, _ = environment.reset()
 
+    obss = []
+    actionss = []
+    new_obss = []
+    rewardss = []
+    doness = []
+
     # starting profiler
-    # jax.profiler.start_server(9999) 
     for i in range(frames):
         # get agents actions
         agent_action, key = dqn_agent.act(jnp.array(state, dtype=jnp.float32), key)
@@ -162,14 +195,23 @@ def train():
         # perform actions
         new_state, reward, terminated, truncated, _ = environment.step(agent_action)
 
-        # update memory and episode rewards
-        experience_memory.batch_update_memory(
-            jnp.array(state),
-            jnp.array(agent_action),
-            jnp.array(reward),
-            jnp.array(new_state),
-            jnp.array(terminated or truncated),
-        )
+        done_flag = terminated or truncated
+        dones = jnp.full((2,), done_flag, dtype=jnp.bool_)
+        
+        obss.extend(state)
+        actionss.extend(agent_action)
+        new_obss.extend(new_state)
+        rewardss.extend(reward)
+        doness.extend(dones)
+
+        # # update memory and episode rewards
+        # experience_memory.batch_update_memory(
+        #     jnp.array(state),
+        #     jnp.array(agent_action),
+        #     jnp.array(reward),
+        #     jnp.array(new_state),
+        #     jnp.array(terminated or truncated),
+        # )
         current_reward += sum(reward)
 
         # check if end of game
@@ -195,6 +237,21 @@ def train():
                 start_time = time.time()
 
         if (i + 1) % train_every_n_steps == 0:
+            # update memory and episode rewards
+            experience_memory.batch_update_memory(
+                obss,
+                actionss,
+                rewardss,
+                new_obss,
+                doness,
+            )
+            
+            obss = []
+            actionss = []
+            new_obss = []
+            rewardss = []
+            doness = []
+
             key, subkey = jax.random.split(key)
             # sample batch of experiences
             batch, key = experience_memory.retrieve_experience(
@@ -240,7 +297,6 @@ def train():
             state, _ = environment.reset()
             current_reward = 0.0
 
-    jax.profiler.stop_server()
 
 def run_episode(environment, dqn_agent, key):
     done = False
@@ -253,6 +309,7 @@ def run_episode(environment, dqn_agent, key):
         state = new_state
         done = terminated or truncated
     return total_reward, key
+
 
 if __name__ == "__main__":
     train()

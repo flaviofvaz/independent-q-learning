@@ -1,12 +1,11 @@
 import jax.numpy as jnp
 import jax
-from typing import Tuple, List
 from functools import partial
 
 
 class ReplayMemory:
     def __init__(
-        self, capacity, observation_shape, action_shape, rewards_shape, dones_shape
+        self, capacity, observation_shape
     ):
         self._capacity = capacity
         self._pointer = 0
@@ -14,10 +13,10 @@ class ReplayMemory:
 
         # Pre-allocate JAX arrays for efficiency
         self._states = jnp.zeros((capacity, *observation_shape), dtype=jnp.uint8)
-        self._actions = jnp.zeros((capacity, action_shape), dtype=jnp.uint8)
-        self._rewards = jnp.zeros((capacity, rewards_shape), dtype=jnp.float32)
+        self._actions = jnp.zeros((capacity), dtype=jnp.uint8)
+        self._rewards = jnp.zeros((capacity), dtype=jnp.float32)
         self._next_states = jnp.zeros((capacity, *observation_shape), dtype=jnp.uint8)
-        self._dones = jnp.zeros((capacity, dones_shape), dtype=jnp.bool_)
+        self._dones = jnp.zeros((capacity), dtype=jnp.bool_)
 
     def update_memory(
         self,
@@ -56,10 +55,10 @@ class ReplayMemory:
     ):
         # convert dtypes
         state_jax = jnp.asarray(state, dtype=jnp.uint8)
-        action_jax = jnp.expand_dims(jnp.asarray(action, dtype=jnp.uint8), axis=-1)
-        reward_jax = jnp.expand_dims(jnp.sign(jnp.asarray(reward, jnp.float32)), axis=-1)
+        action_jax = jnp.asarray(action, dtype=jnp.uint8)
+        reward_jax = jnp.sign(jnp.asarray(reward, jnp.float32))
         next_state_jax = jnp.asarray(next_state, dtype=jnp.uint8)
-        done_jax = jnp.expand_dims(jnp.asarray(is_done, dtype=jnp.bool_), axis=-1)
+        done_jax = jnp.asarray(is_done, dtype=jnp.bool_)
 
         new_states, new_actions, new_rewards, new_next_states, new_dones, new_pointer, new_size = _batch_update_memory(self._states, self._actions, self._rewards, self._next_states, self._dones, self._pointer, self._size, self._capacity,
                        state_jax, action_jax, reward_jax, next_state_jax, done_jax)

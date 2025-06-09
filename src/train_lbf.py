@@ -6,10 +6,20 @@ import jax.numpy as jnp
 import jax
 import time
 from memory import ReplayMemory
+import rlax
+import numpy as np
+import random as py_random
 
 
 # for cpu development
 jax.config.update("jax_platforms", "cpu")
+
+
+def set_randomness(seed):
+    py_random.seed(seed)
+    np.random.seed(seed)
+    return jax.random.PRNGKey(seed)
+
 
 def initialize_replay_memory(
     memory: ReplayMemory, environment: LbfEnvironment, starting_capacity: int
@@ -60,6 +70,8 @@ def initialize_replay_memory(
         if counter % 1000 == 0:
             print(f"{memory.get_size()} entries added to memory")
 
+_batched_q_learning = jax.vmap(rlax.q_learning)
+
 @nnx.jit
 def td_loss(
     model: nnx.Module,
@@ -72,20 +84,19 @@ def td_loss(
 ):
     # td estimate
     q_values = model(state)
-    action_squeezed = action.squeeze(axis=-1) 
-    td_estimate = q_values[jnp.arange(q_values.shape[0]), action_squeezed]
 
     # td target
     target_q_values = jax.lax.stop_gradient(target_model(next_state))
-    max_q_values = jnp.max(target_q_values, axis=-1)
-    td_target = reward.squeeze(-1) + 0.99 * (1.0 - is_done.squeeze(-1)) * max_q_values
 
     # td error
-    delta = td_target - td_estimate
-    huber_loss = jnp.where(jnp.abs(delta) < 1.0, 
-                            0.5 * delta**2, 
-                            jnp.abs(delta) - 0.5)
-    return jnp.mean(huber_loss)
+    discount = 0.99 * (1.0 - is_done)
+    error_bound = 1.0 / 32.0
+    
+    td_error = _batched_q_learning(q_values, action, reward, discount, target_q_values)
+    td_error = rlax.clip_gradient(td_error, -error_bound , error_bound)
+    loss = rlax.l2_loss(td_error)
+    return jnp.mean(loss)
+
 
 @nnx.jit
 def train_step(
@@ -108,16 +119,16 @@ def train_step(
 
 def train():
     environment_name = "Foraging-8x8-2p-2f-coop-v3"
-    rng = 0
+    seed = 42
     batch_size = 32
     frames = 10_000_000
-    learning_rate = 0.0003
+    learning_rate = 0.00025
     memory_capacity = 1_000_000
     starting_capacity = 50_000
     action_space_dim = 6
     observation_space = (12,)
     train_every_n_steps = 4
-    update_target_every_n_steps = 10_000
+    update_target_every_n_steps = 200
     evaluate_every_n_steps = 100_000
     evaluation_episodes = 100
     evaluation_epsilon = 0.05
@@ -126,16 +137,13 @@ def train():
     environment = LbfEnvironment(environment_name)
 
     # initialize main random key
-    key = jax.random.PRNGKey(rng)
+    key = set_randomness(seed)
 
     # initialize experience/replay memory
     print("Initializing experience memory")
     experience_memory = ReplayMemory(
         capacity=memory_capacity,
         observation_shape=observation_space,
-        action_shape=1,
-        rewards_shape=1,
-        dones_shape=1,
     )
     
     # splitting random keys
@@ -147,8 +155,7 @@ def train():
     )
 
     # create target network
-    nnx_graphdef, nnx_state = nnx.split(q_network)
-    target_q_network = nnx.merge(nnx_graphdef, nnx_state)
+    target_q_network = nnx.clone(q_network)
 
     # create dqn agent
     dqn_agent = DQNAgent(
@@ -156,7 +163,8 @@ def train():
     )
 
     # define optimizer
-    optimizer = nnx.Optimizer(dqn_agent.network, optax.adam(learning_rate))
+    tx = optax.rmsprop(learning_rate=learning_rate, eps=0.01/32**2, centered=True, decay=0.95)
+    optimizer = nnx.Optimizer(dqn_agent.network, tx)
 
     # define metrics
     metrics = nnx.MultiMetric(loss=nnx.metrics.Average("loss"))
@@ -179,12 +187,14 @@ def train():
     rewardss = []
     doness = []
 
+    multiplier = jnp.array([1./8, 1./8, 1./10.] * 4)
     start_time = time.time()
     state, _ = environment.reset()
     for i in range(frames):
         state = jnp.array(state, dtype=jnp.float32)
+        norm_state = state * multiplier
         # get agents actions
-        agent_action, key = dqn_agent.act(state, key)
+        agent_action, key = dqn_agent.act(norm_state, key)
 
         # perform actions
         new_state, reward, terminated, truncated, _ = environment.step(agent_action)
@@ -243,10 +253,10 @@ def train():
                 batch_size=batch_size, key=key
             )
 
-            state_batch = jnp.array(batch["state"], dtype=jnp.float32)
+            state_batch = jnp.array(batch["state"], dtype=jnp.float32) * multiplier
             action_batch = batch["action"]
             reward_batch = batch["reward"]
-            next_state_batch = jnp.array(batch["next_state"], dtype=jnp.float32)
+            next_state_batch = jnp.array(batch["next_state"], dtype=jnp.float32) * multiplier
             is_terminal_batch = jnp.array(batch["is_terminal"], dtype=jnp.float32)
 
             train_step(
